@@ -6,591 +6,574 @@ import json
 import os
 import threading
 
-app = Flask(__name__)
+PostgreSQL is used on Render when DATABASE_URL is available.
 
-# =========================
-# MOHIT BANKING
-# =========================
+JSON is kept as a local fallback for testing on a phone/PC.
 
-app.secret_key = "mohit-banking-demo-key"
+try:
+import psycopg
+except ImportError:
+psycopg = None
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(name)
+app.secret_key = os.environ.get("SECRET_KEY", "prince-banking-demo-key")
+
+BASE_DIR = os.path.dirname(os.path.abspath(file))
 DATA_FILE = os.path.join(BASE_DIR, "bank_data.json")
-
 LOCK = threading.Lock()
 
+=========================
 
-# =========================
-# DATABASE
-# =========================
+DATABASE HELPERS
+
+=========================
+
+def using_postgres():
+return bool(os.environ.get("DATABASE_URL")) and psycopg is not None
+
+def postgres_url():
+url = os.environ.get("DATABASE_URL", "")
+if url.startswith("postgres://"):
+url = "postgresql://" + url[len("postgres://"):]
+return url
+
+def default_admin():
+return {
+"account_no": "ADMIN001",
+"name": "Prince Banking Admin",
+"email": "admin@princebanking.com",
+"phone": "",
+"account_type": "Admin",
+"password_hash": generate_password_hash("admin123"),
+"balance": 0.0,
+"transactions": []
+}
 
 def create_database():
-    data = {
-        "users": [
-            {
-                "account_no": "ADMIN001",
-                "name": "Mohit Banking Admin",
-                "email": "admin@mohitbanking.com",
-                "phone": "",
-                "account_type": "Admin",
-                "password_hash": generate_password_hash("admin123"),
-                "balance": 0.0,
-                "transactions": []
-            }
-        ]
-    }
+data = {"users": [default_admin()]}
+with open(DATA_FILE, "w", encoding="utf-8") as file:
+json.dump(data, file, indent=4)
 
-    with open(DATA_FILE, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
+def load_json_database():
+if not os.path.exists(DATA_FILE):
+create_database()
 
+try:  
+    with open(DATA_FILE, "r", encoding="utf-8") as file:  
+        data = json.load(file)  
+
+    if not isinstance(data, dict):  
+        create_database()  
+        with open(DATA_FILE, "r", encoding="utf-8") as file:  
+            data = json.load(file)  
+
+    data.setdefault("users", [])  
+    return data  
+
+except Exception:  
+    create_database()  
+    with open(DATA_FILE, "r", encoding="utf-8") as file:  
+        return json.load(file)
+
+def init_postgres():
+"""Create the users table and migrate existing JSON data only if DB is empty."""
+if not using_postgres():
+return
+
+with psycopg.connect(postgres_url()) as conn:  
+    with conn.cursor() as cur:  
+        cur.execute("""  
+            CREATE TABLE IF NOT EXISTS users (  
+                account_no TEXT PRIMARY KEY,  
+                name TEXT NOT NULL,  
+                email TEXT,  
+                phone TEXT,  
+                account_type TEXT NOT NULL,  
+                password_hash TEXT NOT NULL,  
+                balance DOUBLE PRECISION NOT NULL DEFAULT 0,  
+                transactions JSONB NOT NULL DEFAULT '[]'::jsonb  
+            )  
+        """)  
+
+        cur.execute("SELECT COUNT(*) FROM users")  
+        count = cur.fetchone()[0]  
+
+        if count == 0:  
+            local_data = load_json_database()  
+
+            for user in local_data.get("users", []):  
+                cur.execute("""  
+                    INSERT INTO users  
+                    (account_no, name, email, phone, account_type,  
+                     password_hash, balance, transactions)  
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)  
+                    ON CONFLICT (account_no) DO NOTHING  
+                """, (  
+                    str(user.get("account_no", "")),  
+                    user.get("name", ""),  
+                    user.get("email", ""),  
+                    user.get("phone", ""),  
+                    user.get("account_type", "Savings"),  
+                    user.get("password_hash", ""),  
+                    float(user.get("balance", 0)),  
+                    json.dumps(user.get("transactions", []))  
+                ))  
+
+    conn.commit()
 
 def load_database():
-    if not os.path.exists(DATA_FILE):
-        create_database()
+if using_postgres():
+init_postgres()
 
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
+with psycopg.connect(postgres_url()) as conn:  
+        with conn.cursor() as cur:  
+            cur.execute("""  
+                SELECT account_no, name, email, phone, account_type,  
+                       password_hash, balance, transactions  
+                FROM users  
+                ORDER BY account_no  
+            """)  
+            rows = cur.fetchall()  
 
-        if not isinstance(data, dict):
-            create_database()
-            return load_database()
+    users = []  
+    for row in rows:  
+        transactions = row[7] or []  
+        if isinstance(transactions, str):  
+            try:  
+                transactions = json.loads(transactions)  
+            except Exception:  
+                transactions = []  
 
-        data.setdefault("users", [])
-        return data
+        users.append({  
+            "account_no": row[0],  
+            "name": row[1],  
+            "email": row[2] or "",  
+            "phone": row[3] or "",  
+            "account_type": row[4],  
+            "password_hash": row[5],  
+            "balance": float(row[6] or 0),  
+            "transactions": transactions  
+        })  
 
-    except Exception:
-        create_database()
-        return load_database()
+    return {"users": users}  
 
+return load_json_database()
 
 def save_database(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
+"""Save the same dictionary format to PostgreSQL or local JSON."""
+if using_postgres():
+init_postgres()
 
+with psycopg.connect(postgres_url()) as conn:  
+        with conn.cursor() as cur:  
+            for user in data.get("users", []):  
+                cur.execute("""  
+                    INSERT INTO users  
+                    (account_no, name, email, phone, account_type,  
+                     password_hash, balance, transactions)  
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)  
+                    ON CONFLICT (account_no) DO UPDATE SET  
+                        name = EXCLUDED.name,  
+                        email = EXCLUDED.email,  
+                        phone = EXCLUDED.phone,  
+                        account_type = EXCLUDED.account_type,  
+                        password_hash = EXCLUDED.password_hash,  
+                        balance = EXCLUDED.balance,  
+                        transactions = EXCLUDED.transactions  
+                """, (  
+                    str(user.get("account_no", "")),  
+                    user.get("name", ""),  
+                    user.get("email", ""),  
+                    user.get("phone", ""),  
+                    user.get("account_type", "Savings"),  
+                    user.get("password_hash", ""),  
+                    float(user.get("balance", 0)),  
+                    json.dumps(user.get("transactions", []))  
+                ))  
+
+            # Remove database users that were deleted from the app.  
+            accounts = [  
+                str(u.get("account_no", ""))  
+                for u in data.get("users", [])  
+            ]  
+            cur.execute(  
+                "DELETE FROM users WHERE NOT (account_no = ANY(%s))",  
+                (accounts,)  
+            )  
+
+        conn.commit()  
+    return  
+
+temporary_file = DATA_FILE + ".tmp"  
+with open(temporary_file, "w", encoding="utf-8") as file:  
+    json.dump(data, file, indent=4)  
+os.replace(temporary_file, DATA_FILE)
 
 def find_user(account_no):
-    database = load_database()
+database = load_database()
 
-    for user in database["users"]:
-        if str(user["account_no"]) == str(account_no):
-            return user
+for user in database.get("users", []):  
+    if str(user.get("account_no", "")) == str(account_no):  
+        return user  
 
-    return None
+return None
 
+=========================
 
-# =========================
-# LOGIN PROTECTION
-# =========================
+LOGIN PROTECTION
+
+=========================
 
 def login_required(function):
-
-    @wraps(function)
-    def wrapper(*args, **kwargs):
-
-        if "account_no" not in session:
-            return redirect(url_for("login"))
-
-        return function(*args, **kwargs)
-
-    return wrapper
-
+@wraps(function)
+def wrapper(*args, **kwargs):
+if "account_no" not in session:
+return redirect(url_for("login"))
+return function(*args, **kwargs)
+return wrapper
 
 def admin_required(function):
+@wraps(function)
+def wrapper(*args, **kwargs):
+if session.get("is_admin") is not True:
+flash("Admin access required.", "error")
+return redirect(url_for("dashboard"))
+return function(*args, **kwargs)
+return wrapper
 
-    @wraps(function)
-    def wrapper(*args, **kwargs):
+=========================
 
-        if session.get("is_admin") is not True:
-            flash("Admin access required.", "error")
-            return redirect(url_for("dashboard"))
+HOME
 
-        return function(*args, **kwargs)
-
-    return wrapper
-
-
-# =========================
-# HOME
-# =========================
+=========================
 
 @app.route("/")
 def home():
+if "account_no" in session:
+if session.get("is_admin"):
+return redirect(url_for("admin"))
+return redirect(url_for("dashboard"))
 
-    if "account_no" in session:
+return redirect(url_for("login"))
 
-        if session.get("is_admin"):
-            return redirect(url_for("admin"))
+=========================
 
-        return redirect(url_for("dashboard"))
+LOGIN
 
-    return redirect(url_for("login"))
-
-
-# =========================
-# LOGIN
-# =========================
+=========================
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+if request.method == "POST":
+account_no = request.form.get("account_no", "").strip().upper()
+password = request.form.get("password", "")
 
-    if request.method == "POST":
+user = find_user(account_no)  
 
-        account_no = request.form.get(
-            "account_no", ""
-        ).strip().upper()
+    if user:  
+        password_hash = user.get("password_hash", "")  
 
-        password = request.form.get(
-            "password", ""
-        )
+        try:  
+            password_correct = bool(  
+                password_hash and  
+                check_password_hash(password_hash, password)  
+            )  
+        except Exception:  
+            password_correct = False  
 
-        user = find_user(account_no)
+        if password_correct:  
+            session["account_no"] = user.get("account_no")  
+            session["is_admin"] = user.get("account_type") == "Admin"  
 
-        if user:
+            if session["is_admin"]:  
+                return redirect(url_for("admin"))  
 
-            try:
-                correct = check_password_hash(
-                    user["password_hash"],
-                    password
-                )
-            except Exception:
-                correct = False
+            return redirect(url_for("dashboard"))  
 
-            if correct:
+    flash("Invalid account number or password.", "error")  
 
-                session["account_no"] = user["account_no"]
-                session["is_admin"] = (
-                    user["account_type"] == "Admin"
-                )
+return render_template("login.html")
 
-                if session["is_admin"]:
-                    return redirect(url_for("admin"))
+=========================
 
-                return redirect(url_for("dashboard"))
+LOGOUT
 
-        flash(
-            "Invalid account number or password.",
-            "error"
-        )
-
-    return render_template("login.html")
-
-
-# =========================
-# LOGOUT
-# =========================
+=========================
 
 @app.route("/logout")
 def logout():
+session.clear()
+return redirect(url_for("login"))
 
-    session.clear()
+=========================
 
-    return redirect(url_for("login"))
+REGISTER
 
-
-# =========================
-# REGISTER
-# =========================
+=========================
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
+if request.method == "POST":
+name = request.form.get("name", "").strip()
+email = request.form.get("email", "").strip()
+phone = request.form.get("phone", "").strip()
+account_type = request.form.get("account_type", "Savings")
+password = request.form.get("password", "")
+confirm_password = request.form.get("confirm_password", "")
 
-    if request.method == "POST":
+if not name:  
+        flash("Please enter your name.", "error")  
+        return render_template("register.html")  
 
-        name = request.form.get(
-            "name", ""
-        ).strip()
+    if len(password) < 6:  
+        flash("Password must contain at least 6 characters.", "error")  
+        return render_template("register.html")  
 
-        email = request.form.get(
-            "email", ""
-        ).strip()
+    if password != confirm_password:  
+        flash("Passwords do not match.", "error")  
+        return render_template("register.html")  
 
-        phone = request.form.get(
-            "phone", ""
-        ).strip()
+    if account_type not in ["Savings", "Current"]:  
+        account_type = "Savings"  
 
-        account_type = request.form.get(
-            "account_type",
-            "Savings"
-        )
+    with LOCK:  
+        database = load_database()  
 
-        password = request.form.get(
-            "password", ""
-        )
+        numbers = []  
+        for user in database.get("users", []):  
+            account = str(user.get("account_no", ""))  
+            if account.isdigit():  
+                numbers.append(int(account))  
 
-        confirm_password = request.form.get(
-            "confirm_password", ""
-        )
+        new_account = str(max(numbers) + 1 if numbers else 100001)  
 
-        if not name:
-            flash(
-                "Please enter your name.",
-                "error"
-            )
-            return render_template("register.html")
+        new_user = {  
+            "account_no": new_account,  
+            "name": name,  
+            "email": email,  
+            "phone": phone,  
+            "account_type": account_type,  
+            "password_hash": generate_password_hash(password),  
+            "balance": 0.0,  
+            "transactions": []  
+        }  
 
-        if len(password) < 6:
-            flash(
-                "Password must contain at least 6 characters.",
-                "error"
-            )
-            return render_template("register.html")
+        database.setdefault("users", []).append(new_user)  
+        save_database(database)  
 
-        if password != confirm_password:
-            flash(
-                "Passwords do not match.",
-                "error"
-            )
-            return render_template("register.html")
+    return render_template(  
+        "register.html",  
+        created_account=new_account  
+    )  
 
-        if account_type not in [
-            "Savings",
-            "Current"
-        ]:
-            account_type = "Savings"
+return render_template("register.html")
 
-        with LOCK:
+=========================
 
-            database = load_database()
+DASHBOARD
 
-            numbers = []
-
-            for user in database["users"]:
-
-                account = str(
-                    user.get("account_no", "")
-                )
-
-                if account.isdigit():
-                    numbers.append(
-                        int(account)
-                    )
-
-            if numbers:
-                new_account = max(numbers) + 1
-            else:
-                new_account = 100001
-
-            new_account = str(new_account)
-
-            new_user = {
-                "account_no": new_account,
-                "name": name,
-                "email": email,
-                "phone": phone,
-                "account_type": account_type,
-                "password_hash":
-                    generate_password_hash(password),
-                "balance": 0.0,
-                "transactions": []
-            }
-
-            database["users"].append(new_user)
-
-            save_database(database)
-
-        return render_template(
-            "register.html",
-            created_account=new_account
-        )
-
-    return render_template("register.html")
-
-
-# =========================
-# DASHBOARD
-# =========================
+=========================
 
 @app.route("/dashboard")
 @login_required
 def dashboard():
+user = find_user(session["account_no"])
 
-    user = find_user(
-        session["account_no"]
-    )
+if not user:  
+    session.clear()  
+    return redirect(url_for("login"))  
 
-    if not user:
+account_type = user.get("account_type", "Savings")  
+user["account_type"] = account_type  
 
-        session.clear()
+balance = float(user.get("balance", 0))  
+transactions = list(reversed(user.get("transactions", [])))  
 
-        return redirect(
-            url_for("login")
-        )
+return render_template(  
+    "dashboard.html",  
+    user=user,  
+    balance=balance,  
+    transactions=transactions[:10]  
+)
 
-    balance = float(
-        user.get("balance", 0)
-    )
+=========================
 
-    transactions = list(
-        reversed(
-            user.get("transactions", [])
-        )
-    )
+DEPOSIT
 
-    return render_template(
-        "dashboard.html",
-        user=user,
-        balance=balance,
-        transactions=transactions[:10]
-    )
-
-
-# =========================
-# DEPOSIT
-# =========================
+=========================
 
 @app.route("/deposit", methods=["POST"])
 @login_required
 def deposit():
+try:
+amount = float(request.form.get("amount", 0))
+except (ValueError, TypeError):
+amount = 0
 
-    try:
-        amount = float(
-            request.form.get("amount", 0)
-        )
-    except:
-        amount = 0
+if amount <= 0:  
+    flash("Enter a valid amount.", "error")  
+    return redirect(url_for("dashboard"))  
 
-    if amount <= 0:
+with LOCK:  
+    database = load_database()  
+    user = None  
 
-        flash(
-            "Enter a valid amount.",
-            "error"
-        )
+    for item in database.get("users", []):  
+        if str(item.get("account_no")) == str(session["account_no"]):  
+            user = item  
+            break  
 
-        return redirect(
-            url_for("dashboard")
-        )
+    if not user:  
+        flash("Account not found.", "error")  
+        return redirect(url_for("logout"))  
 
-    with LOCK:
+    current_balance = float(user.get("balance", 0))  
+    user["balance"] = round(current_balance + amount, 2)  
 
-        database = load_database()
+    transaction = {  
+        "title": "Cash Deposit",  
+        "amount": f"+₹{amount:,.2f}",  
+        "type": "deposit",  
+        "date": datetime.now().strftime("%d %b %Y, %I:%M %p")  
+    }  
 
-        user = find_user(
-            session["account_no"]
-        )
+    user.setdefault("transactions", []).append(transaction)  
+    save_database(database)  
 
-        if not user:
+flash(f"₹{amount:,.2f} deposited successfully.", "success")  
+return redirect(url_for("dashboard"))
 
-            flash(
-                "Account not found.",
-                "error"
-            )
+=========================
 
-            return redirect(
-                url_for("logout")
-            )
+WITHDRAW
 
-        user["balance"] = round(
-            float(user.get("balance", 0))
-            + amount,
-            2
-        )
-
-        transaction = {
-            "title": "Cash Deposit",
-            "amount": f"+₹{amount:,.2f}",
-            "type": "deposit",
-            "date": datetime.now().strftime(
-                "%d %b %Y, %I:%M %p"
-            )
-        }
-
-        user.setdefault(
-            "transactions", []
-        ).append(transaction)
-
-        save_database(database)
-
-    flash(
-        f"₹{amount:,.2f} deposited successfully.",
-        "success"
-    )
-
-    return redirect(
-        url_for("dashboard")
-    )
-
-
-# =========================
-# WITHDRAW
-# =========================
+=========================
 
 @app.route("/withdraw", methods=["POST"])
 @login_required
 def withdraw():
+try:
+amount = float(request.form.get("amount", 0))
+except (ValueError, TypeError):
+amount = 0
 
-    try:
-        amount = float(
-            request.form.get("amount", 0)
-        )
-    except:
-        amount = 0
+if amount <= 0:  
+    flash("Enter a valid amount.", "error")  
+    return redirect(url_for("dashboard"))  
 
-    if amount <= 0:
+with LOCK:  
+    database = load_database()  
+    user = None  
 
-        flash(
-            "Enter a valid amount.",
-            "error"
-        )
+    for item in database.get("users", []):  
+        if str(item.get("account_no")) == str(session["account_no"]):  
+            user = item  
+            break  
 
-        return redirect(
-            url_for("dashboard")
-        )
+    if not user:  
+        flash("Account not found.", "error")  
+        return redirect(url_for("logout"))  
 
-    with LOCK:
+    current_balance = float(user.get("balance", 0))  
 
-        database = load_database()
+    if amount > current_balance:  
+        flash("Insufficient balance.", "error")  
+        return redirect(url_for("dashboard"))  
 
-        user = find_user(
-            session["account_no"]
-        )
+    user["balance"] = round(current_balance - amount, 2)  
 
-        if not user:
+    transaction = {  
+        "title": "Cash Withdrawal",  
+        "amount": f"-₹{amount:,.2f}",  
+        "type": "withdraw",  
+        "date": datetime.now().strftime("%d %b %Y, %I:%M %p")  
+    }  
 
-            flash(
-                "Account not found.",
-                "error"
-            )
+    user.setdefault("transactions", []).append(transaction)  
+    save_database(database)  
 
-            return redirect(
-                url_for("logout")
-            )
+flash(f"₹{amount:,.2f} withdrawn successfully.", "success")  
+return redirect(url_for("dashboard"))
 
-        balance = float(
-            user.get("balance", 0)
-        )
+=========================
 
-        if amount > balance:
+ADMIN DASHBOARD
 
-            flash(
-                "Insufficient balance.",
-                "error"
-            )
-
-            return redirect(
-                url_for("dashboard")
-            )
-
-        user["balance"] = round(
-            balance - amount,
-            2
-        )
-
-        transaction = {
-            "title": "Cash Withdrawal",
-            "amount": f"-₹{amount:,.2f}",
-            "type": "withdraw",
-            "date": datetime.now().strftime(
-                "%d %b %Y, %I:%M %p"
-            )
-        }
-
-        user.setdefault(
-            "transactions", []
-        ).append(transaction)
-
-        save_database(database)
-
-    flash(
-        f"₹{amount:,.2f} withdrawn successfully.",
-        "success"
-    )
-
-    return redirect(
-        url_for("dashboard")
-    )
-
-
-# =========================
-# ADMIN DASHBOARD
-# =========================
+=========================
 
 @app.route("/admin")
 @login_required
 @admin_required
 def admin():
+database = load_database()
+users = []
+total_balance = 0.0
 
-    database = load_database()
+for user in database.get("users", []):  
+    if user.get("account_type") != "Admin":  
+        users.append(user)  
+        total_balance += float(user.get("balance", 0))  
 
-    users = []
-    total_balance = 0.0
-
-    for user in database["users"]:
-
-        if user.get("account_type") != "Admin":
-
-            users.append(user)
-
-            total_balance += float(
-                user.get("balance", 0)
-            )
-
-    return render_template(
-        "admin.html",
-        users=users,
-        total_balance=total_balance
-    )
-
-
-# =========================
-# DELETE CUSTOMER
-# =========================
-
-@app.route(
-    "/admin/delete/<account_no>",
-    methods=["POST"]
+return render_template(  
+    "admin.html",  
+    users=users,  
+    total_balance=total_balance  
 )
+
+=========================
+
+DELETE CUSTOMER
+
+=========================
+
+@app.route("/admin/delete/<account_no>", methods=["POST"])
 @login_required
 @admin_required
 def delete_user(account_no):
+with LOCK:
+database = load_database()
 
-    with LOCK:
+database["users"] = [  
+        user for user in database.get("users", [])  
+        if not (  
+            str(user.get("account_no", "")) == str(account_no)  
+            and user.get("account_type") != "Admin"  
+        )  
+    ]  
 
-        database = load_database()
+    save_database(database)  
 
-        database["users"] = [
-            user
-            for user in database["users"]
-            if not (
-                str(user.get("account_no"))
-                == str(account_no)
-                and user.get("account_type")
-                != "Admin"
-            )
-        ]
+flash("Customer account removed.", "success")  
+return redirect(url_for("admin"))
 
-        save_database(database)
+=========================
 
-    flash(
-        "Customer account removed.",
-        "success"
-    )
+STARTUP
 
-    return redirect(
-        url_for("admin")
-    )
+=========================
 
+if name == "main":
+print("")
+print("================================")
+print("       PRINCE BANKING")
+print("================================")
+print("")
 
-# =========================
-# START SERVER
-# =========================
+if using_postgres():  
+    init_postgres()  
+    print("Database : PostgreSQL")  
+else:  
+    print("Database : bank_data.json (local fallback)")  
 
-if __name__ == "__main__":
+print("Admin Account : ADMIN001")  
+print("Admin Password: admin123")  
+print("")  
+print("Open: http://127.0.0.1:5000")  
+print("")  
 
-    print("")
-    print("================================")
-    print("          MOHIT BANKING")
-    print("================================")
-    print("")
-    print("Database : bank_data.json")
-    print("Admin Account : ADMIN001")
-    print("Admin Password : admin123")
-    print("")
-    print("Open: http://127.0.0.1:5000")
-    print("")
+app.run(  
+    host="0.0.0.0",  
+    port=5000,  
+    debug=True
 
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=True
-        )
+)
